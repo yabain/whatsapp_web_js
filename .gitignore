@@ -142,3 +142,6 @@ vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
 .DS_Store
+.wwebjs_cache/2.3000.1040789040.html
+Archive.zip
+/whatsapp-session
