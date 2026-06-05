@@ -86,12 +86,33 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
 
     for (const candidate of candidates) {
       try {
-        const numberId = await this.client.getNumberId(candidate).catch(() => null);
-        const chatId = numberId?._serialized || `${candidate}@c.us`;
-        await this.client.sendMessage(chatId, message);
-        return { sent: true, to: chatId, attemptedNumbers: candidates };
+        const result = await this.sendToCandidate(candidate, message);
+        return { sent: true, to: result.chatId, attemptedNumbers: candidates };
       } catch (error: any) {
         errors.push(`${candidate}: ${error?.message || error}`);
+      }
+    }
+
+    if (this.shouldRetryLegacyLocalPhone(phone, errors)) {
+      const retryCandidates = this.buildLegacyLocalPhoneCandidates(phone).filter((candidate) => !candidates.includes(candidate));
+      if (retryCandidates.length) {
+        await this.restartClient();
+        if (!this.client || this.status !== 'ready') {
+          errors.push(`legacy retry: WhatsApp is not ready after restart (current status: ${this.status})`);
+        } else {
+          for (const candidate of retryCandidates) {
+            try {
+              const result = await this.sendToCandidate(candidate, message);
+              return {
+                sent: true,
+                to: result.chatId,
+                attemptedNumbers: [...candidates, ...retryCandidates],
+              };
+            } catch (error: any) {
+              errors.push(`${candidate}: ${error?.message || error}`);
+            }
+          }
+        }
       }
     }
 
@@ -218,6 +239,14 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     await this.initialize();
   }
 
+  private async sendToCandidate(candidate: string, message: string) {
+    if (!this.client) throw new BadRequestException('WhatsApp client is not initialized');
+    const numberId = await this.client.getNumberId(candidate).catch(() => null);
+    const chatId = numberId?._serialized || `${candidate}@c.us`;
+    await this.client.sendMessage(chatId, message);
+    return { chatId };
+  }
+
   private getAuthDataPath() {
     const configured = process.env.WHATSAPP_SESSION_DIR || 'whatsapp-session';
     return isAbsolute(configured) ? configured : join(process.cwd(), configured);
@@ -232,10 +261,23 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       candidates.push(`237${digits.slice(4)}`);
     }
     if (digits.startsWith('6') && digits.length === 9) {
+      candidates.push(digits.slice(1));
       candidates.push(`237${digits}`);
       candidates.push(`237${digits.slice(1)}`);
     }
 
     return [...new Set(candidates)];
+  }
+
+  private shouldRetryLegacyLocalPhone(phone: string, errors: string[]) {
+    const digits = String(phone || '').replace(/\D/g, '');
+    if (!digits.startsWith('6') || digits.length !== 9) return false;
+    return errors.some((error) => /detached frame|no lid for user|getchat/i.test(error));
+  }
+
+  private buildLegacyLocalPhoneCandidates(phone: string) {
+    const digits = String(phone || '').replace(/\D/g, '');
+    if (!digits.startsWith('6') || digits.length !== 9) return [];
+    return [digits.slice(1), `237${digits.slice(1)}`];
   }
 }
