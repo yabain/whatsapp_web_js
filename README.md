@@ -73,3 +73,7 @@ Payload `send-test` et `send-text` :
 Ne lance jamais ce service avec `sudo`, sinon le dossier de session sera cree en root et le reset ne pourra plus le supprimer.
 
 La session WhatsApp reste dans `WHATSAPP_SESSION_DIR`. Ce dossier doit etre persistant sur le VPS.
+
+Si déployé en local
+Démarer Ngrock avec une adresse publique fixe pour rendre le service accessible enligne
+ngrok http --domain=unallowable-hinderingly-amari.ngrok-free.dev 3003
