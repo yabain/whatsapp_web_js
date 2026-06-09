@@ -1,5 +1,5 @@
 import { Body, Controller, Get, Post } from '@nestjs/common';
-import { SendWhatsappDto } from './dto/send-whatsapp.dto';
+import { SendWhatsappDto, SendWhatsappMediaDto } from './dto/send-whatsapp.dto';
 import { WhatsappService } from './whatsapp.service';
 
 @Controller('whatsapp')
@@ -29,5 +29,14 @@ export class WhatsappController {
   @Post('send-text')
   sendText(@Body() dto: SendWhatsappDto) {
     return this.whatsappService.sendText(dto.phone, dto.message);
+  }
+
+  @Post('send-media')
+  sendMedia(@Body() dto: SendWhatsappMediaDto) {
+    return this.whatsappService.sendMedia(dto.phone, dto.message, {
+      data: dto.data,
+      mimetype: dto.mimetype,
+      filename: dto.filename,
+    });
   }
 }

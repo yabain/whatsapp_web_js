@@ -2,7 +2,7 @@ import { BadRequestException, Injectable, Logger, OnModuleDestroy, OnModuleInit 
 import { existsSync, mkdirSync, rmSync } from 'fs';
 import { isAbsolute, join } from 'path';
 import * as QRCode from 'qrcode';
-import { Client, LocalAuth } from 'whatsapp-web.js';
+import { Client, LocalAuth, MessageMedia } from 'whatsapp-web.js';
 
 type WhatsappConnectionStatus = 'initializing' | 'qr' | 'authenticated' | 'ready' | 'disconnected' | 'failed';
 
@@ -119,6 +119,41 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     throw new BadRequestException(`Unable to send WhatsApp message. Attempts: ${errors.join(' | ')}`);
   }
 
+  async sendMedia(
+    phone: string,
+    message: string,
+    media: { data: string; mimetype: string; filename?: string },
+  ) {
+    if (!this.client || this.status !== 'ready') {
+      throw new BadRequestException(`WhatsApp is not ready (current status: ${this.status})`);
+    }
+
+    const candidates = this.buildPhoneCandidates(phone);
+    const errors: string[] = [];
+    for (const candidate of candidates) {
+      try {
+        const result = await this.sendMediaToCandidate(candidate, message, media);
+        return { sent: true, to: result.chatId, attemptedNumbers: candidates };
+      } catch (error: any) {
+        errors.push(`${candidate}: ${error?.message || error}`);
+      }
+    }
+
+    if (this.shouldRetryLegacyLocalPhone(phone, errors)) {
+      const retryCandidates = this.buildLegacyLocalPhoneCandidates(phone).filter((candidate) => !candidates.includes(candidate));
+      for (const candidate of retryCandidates) {
+        try {
+          const result = await this.sendMediaToCandidate(candidate, message, media);
+          return { sent: true, to: result.chatId, attemptedNumbers: [...candidates, ...retryCandidates] };
+        } catch (error: any) {
+          errors.push(`${candidate}: ${error?.message || error}`);
+        }
+      }
+    }
+
+    throw new BadRequestException(`Unable to send WhatsApp media. Attempts: ${errors.join(' | ')}`);
+  }
+
   private async initialize() {
     if (this.initializing || this.client) return;
     this.initializing = true;
@@ -142,7 +177,11 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
             '--disable-gpu',
-            '--no-first-run',
+            '--disable-extensions',
+            '--disable-background-networking',
+            '--disable-background-timer-throttling',
+            '--disable-renderer-backgrounding',
+            '--single-process',
             '--no-zygote',
           ],
         },
@@ -244,6 +283,22 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     const numberId = await this.client.getNumberId(candidate).catch(() => null);
     const chatId = numberId?._serialized || `${candidate}@c.us`;
     await this.client.sendMessage(chatId, message);
+    return { chatId };
+  }
+
+  private async sendMediaToCandidate(
+    candidate: string,
+    message: string,
+    media: { data: string; mimetype: string; filename?: string },
+  ) {
+    if (!this.client) throw new BadRequestException('WhatsApp client is not initialized');
+    const numberId = await this.client.getNumberId(candidate).catch(() => null);
+    const chatId = numberId?._serialized || `${candidate}@c.us`;
+    await this.client.sendMessage(
+      chatId,
+      new MessageMedia(media.mimetype, media.data, media.filename || 'image'),
+      { caption: message },
+    );
     return { chatId };
   }
 
