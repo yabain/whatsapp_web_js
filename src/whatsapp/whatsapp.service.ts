@@ -189,6 +189,9 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       this.status = 'failed';
       this.lastError = error?.message || String(error);
       this.logger.warn(`Unable to initialize WhatsApp client: ${this.lastError}`);
+      if (this.client) {
+        try { await this.client.destroy(); } catch { /* ignore */ }
+      }
       this.client = null;
     } finally {
       this.initializing = false;
