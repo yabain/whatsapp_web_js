@@ -284,18 +284,46 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
 
         inject(
           { module: 'WAWebLid1X1MigrationGating', function: 'Lid1X1MigrationUtils.isLidMigrated' },
-          (func: any, ...args: any[]) => { try { return func(...args); } catch { return false; } },
+          () => false,
         );
 
         inject(
           { module: 'WAWebLid1X1MigrationGating', function: 'shouldHaveAccountLid' },
-          (func: any, ...args: any[]) => { try { return func(...args); } catch { return false; } },
+          () => false,
         );
 
         inject(
           { module: 'WAWebLidMigrationUtils', function: 'toUserLid' },
-          (func: any, wid: any) => { try { return func(wid); } catch { return wid; } },
+          (_func: any, wid: any) => wid,
         );
+
+        const wwebjs = (window as any).WWebJS;
+        const originalGetChat = wwebjs.getChat;
+        wwebjs.getChat = async (chatId: string, options?: any) => {
+          try {
+            return await originalGetChat(chatId, options);
+          } catch (error: any) {
+            if (error?.toString?.().includes('No LID for user')) {
+              const wid = window.require('WAWebWidFactory').createWid(chatId);
+              try {
+                const sync = window.require('WAWebContactSyncUtils');
+                if (sync?.constructUsyncDeltaQuery) {
+                  await sync.constructUsyncDeltaQuery([wid]);
+                }
+              } catch { }
+              try {
+                const action = window.require('WAWebFindChatAction');
+                const result = await action.findOrCreateLatestChat(wid);
+                if (result?.chat) {
+                  return options?.getAsModel === false
+                    ? result.chat
+                    : await wwebjs.getChatModel(result.chat);
+                }
+              } catch { }
+            }
+            throw error;
+          }
+        };
       });
       this.logger.log('WhatsApp LID functions patched successfully');
     } catch (error: any) {
@@ -340,10 +368,13 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
 
     const candidates = [digits];
     if (digits.startsWith('2376') && digits.length === 12) {
+      candidates.push(digits.slice(4));
       candidates.push(`237${digits.slice(4)}`);
     }
     if (digits.startsWith('6') && digits.length === 9) {
+      candidates.push(digits.slice(1));
       candidates.push(`237${digits}`);
+      candidates.push(`237${digits.slice(1)}`);
     }
 
     return [...new Set(candidates)];
@@ -358,6 +389,6 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   private buildLegacyLocalPhoneCandidates(phone: string) {
     const digits = String(phone || '').replace(/\D/g, '');
     if (!digits.startsWith('6') || digits.length !== 9) return [];
-    return [`237${digits}`];
+    return [digits.slice(1), `237${digits}`, `237${digits.slice(1)}`];
   }
 }
