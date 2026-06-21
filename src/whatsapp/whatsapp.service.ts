@@ -283,54 +283,22 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     try {
       await this.client.pupPage.evaluate(() => {
         const wwebjs = (window as any).WWebJS;
-        const inject = wwebjs?.injectToFunction;
-        if (!inject) return;
-
-        inject(
-          { module: 'WAWebLid1X1MigrationGating', function: 'Lid1X1MigrationUtils.isLidMigrated' },
-          () => false,
-        );
-
-        inject(
-          { module: 'WAWebLid1X1MigrationGating', function: 'shouldHaveAccountLid' },
-          () => false,
-        );
-
-        inject(
-          { module: 'WAWebLidMigrationUtils', function: 'toUserLid' },
-          (_func: any, wid: any) => wid,
-        );
-
         const originalGetChat = wwebjs.getChat;
         wwebjs.getChat = async (chatId: string, options?: any) => {
           try {
             return await originalGetChat(chatId, options);
           } catch (error: any) {
             if (error?.toString?.().includes('No LID for user')) {
-              const wid = window.require('WAWebWidFactory').createWid(chatId);
-              try {
-                const sync = window.require('WAWebContactSyncUtils');
-                if (sync?.constructUsyncDeltaQuery) {
-                  await sync.constructUsyncDeltaQuery([wid]);
-                }
-              } catch { }
-              try {
-                const action = window.require('WAWebFindChatAction');
-                const result = await action.findOrCreateLatestChat(wid);
-                if (result?.chat) {
-                  return options?.getAsModel === false
-                    ? result.chat
-                    : await wwebjs.getChatModel(result.chat);
-                }
-              } catch { }
+              const lidChatId = chatId.replace('@c.us', '@lid');
+              return await originalGetChat(lidChatId, options);
             }
             throw error;
           }
         };
       });
-      this.logger.log('WhatsApp LID functions patched successfully');
+      this.logger.log('WhatsApp getChat patched for LID fallback');
     } catch (error: any) {
-      this.logger.warn(`Unable to patch LID functions: ${error?.message || error}`);
+      this.logger.warn(`Unable to patch getChat: ${error?.message || error}`);
     }
   }
 
