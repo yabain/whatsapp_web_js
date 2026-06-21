@@ -277,7 +277,8 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   private async sendToCandidate(candidate: string, message: string) {
     if (!this.client) throw new BadRequestException('WhatsApp client is not initialized');
     const numberId = await this.client.getNumberId(candidate).catch(() => null);
-    const chatId = numberId?._serialized || `${candidate}@c.us`;
+    const userPart = numberId?.user || candidate;
+    const chatId = `${userPart}@c.us`;
     await this.client.sendMessage(chatId, message);
     return { chatId };
   }
@@ -289,7 +290,8 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   ) {
     if (!this.client) throw new BadRequestException('WhatsApp client is not initialized');
     const numberId = await this.client.getNumberId(candidate).catch(() => null);
-    const chatId = numberId?._serialized || `${candidate}@c.us`;
+    const userPart = numberId?.user || candidate;
+    const chatId = `${userPart}@c.us`;
     await this.client.sendMessage(
       chatId,
       new MessageMedia(media.mimetype, media.data, media.filename || 'image'),
@@ -312,9 +314,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       candidates.push(`237${digits.slice(4)}`);
     }
     if (digits.startsWith('6') && digits.length === 9) {
-      candidates.push(digits.slice(1));
       candidates.push(`237${digits}`);
-      candidates.push(`237${digits.slice(1)}`);
     }
 
     return [...new Set(candidates)];
@@ -329,6 +329,6 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   private buildLegacyLocalPhoneCandidates(phone: string) {
     const digits = String(phone || '').replace(/\D/g, '');
     if (!digits.startsWith('6') || digits.length !== 9) return [];
-    return [digits.slice(1), `237${digits.slice(1)}`];
+    return [`237${digits}`];
   }
 }
