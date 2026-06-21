@@ -282,7 +282,8 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     if (!this.client?.pupPage) return;
     try {
       await this.client.pupPage.evaluate(() => {
-        const inject = (window as any).injectToFunction;
+        const wwebjs = (window as any).WWebJS;
+        const inject = wwebjs?.injectToFunction;
         if (!inject) return;
 
         inject(
@@ -300,7 +301,6 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
           (_func: any, wid: any) => wid,
         );
 
-        const wwebjs = (window as any).WWebJS;
         const originalGetChat = wwebjs.getChat;
         wwebjs.getChat = async (chatId: string, options?: any) => {
           try {
