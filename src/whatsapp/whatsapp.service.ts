@@ -217,6 +217,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       this.qrCodeDataUrl = null;
       this.connectedNumber = this.client?.info?.wid?.user || null;
       this.logger.log(`WhatsApp ready${this.connectedNumber ? ` as ${this.connectedNumber}` : ''}`);
+      this.patchLidFunctions();
     });
 
     client.on('disconnected', (reason) => {
@@ -272,6 +273,34 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     await this.destroyClient();
     this.status = 'disconnected';
     await this.initialize();
+  }
+
+  private async patchLidFunctions() {
+    if (!this.client?.pupPage) return;
+    try {
+      await this.client.pupPage.evaluate(() => {
+        const inject = (window as any).injectToFunction;
+        if (!inject) return;
+
+        inject(
+          { module: 'WAWebLid1X1MigrationGating', function: 'Lid1X1MigrationUtils.isLidMigrated' },
+          (func: any, ...args: any[]) => { try { return func(...args); } catch { return false; } },
+        );
+
+        inject(
+          { module: 'WAWebLid1X1MigrationGating', function: 'shouldHaveAccountLid' },
+          (func: any, ...args: any[]) => { try { return func(...args); } catch { return false; } },
+        );
+
+        inject(
+          { module: 'WAWebLidMigrationUtils', function: 'toUserLid' },
+          (func: any, wid: any) => { try { return func(wid); } catch { return wid; } },
+        );
+      });
+      this.logger.log('WhatsApp LID functions patched successfully');
+    } catch (error: any) {
+      this.logger.warn(`Unable to patch LID functions: ${error?.message || error}`);
+    }
   }
 
   private async sendToCandidate(candidate: string, message: string) {
