@@ -11,6 +11,8 @@ npm run start
 ```
 
 Par defaut, le service demarre sur le port `3003`.
+S'assurer de libérer le port avec 
+kill $(lsof -t -i:3003)
 
 ## Variables conseillees sur le VPS
 
