@@ -26,6 +26,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   private qrCode: string | null = null;
   private qrCodeDataUrl: string | null = null;
   private connectedNumber: string | null = null;
+  private connectedSince: string | null = null;
   private lastError: string | null = null;
   private initializing = false;
   private readyWatchdog: NodeJS.Timeout | null = null;
@@ -50,6 +51,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     return {
       status: this.status,
       connected: this.status === 'ready',
+      connectedSince: this.connectedSince,
       hasQr: !!this.qrCodeDataUrl,
       connectedNumber: this.connectedNumber,
       lastError: this.lastError,
@@ -60,6 +62,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     if (!this.client && !this.initializing) await this.initialize();
     return {
       status: this.status,
+      connectedSince: this.connectedSince,
       qr: this.qrCode,
       qrDataUrl: this.qrCodeDataUrl,
       connected: this.status === 'ready',
@@ -86,6 +89,7 @@ this.metricsService.incrementCounter('connection_init_failures_total');
     this.qrCode = null;
     this.qrCodeDataUrl = null;
     this.connectedNumber = null;
+    this.connectedSince = null;
     this.lastError = null;
     this.status = 'disconnected';
     await this.initialize();
@@ -306,6 +310,7 @@ this.metricsService.incrementCounter('connection_init_failures_total');
       this.qrCode = null;
       this.qrCodeDataUrl = null;
       this.connectedNumber = this.client?.info?.wid?.user || null;
+      this.connectedSince = new Date().toISOString();
       this.metricsService.incrementCounter('connection_ready_total');
       this.logger.log(`WhatsApp ready${this.connectedNumber ? ` as ${this.connectedNumber}` : ''}`);
       this.patchLidFunctions();
@@ -315,6 +320,7 @@ this.metricsService.incrementCounter('connection_init_failures_total');
       this.clearReadyWatchdog();
       this.status = 'disconnected';
       this.connectedNumber = null;
+      this.connectedSince = null;
       this.lastError = reason || null;
       this.qrCode = null;
       this.qrCodeDataUrl = null;
