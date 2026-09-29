@@ -333,22 +333,22 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     return isAbsolute(configured) ? configured : join(process.cwd(), configured);
   }
 
-  private buildPhoneCandidates(phone: string) {
-    const digits = String(phone || '').replace(/\D/g, '');
-    if (!digits) throw new BadRequestException('Phone number is required');
+  private buildPhoneCandidates(phone: string): string[] {
+    const localDigits = Number(process.env.WHATSAPP_LOCAL_DIGITS || 9);
+    const defaultCountryCode = process.env.WHATSAPP_DEFAULT_COUNTRY_CODE || '';
 
-    const candidates = [digits];
-    if (digits.startsWith('2376') && digits.length === 12) {
-      candidates.push(digits.slice(4));
-      candidates.push(`237${digits.slice(4)}`);
-    }
-    if (digits.startsWith('6') && digits.length === 9) {
-      candidates.push(digits.slice(1));
-      candidates.push(`237${digits}`);
-      candidates.push(`237${digits.slice(1)}`);
+    // Normalize: remove +, spaces, dashes, parentheses, etc.
+    const normalized = String(phone || '').replace(/[+\s\-\(\)]/g, '');
+    if (!normalized) throw new BadRequestException('Phone number is required');
+
+    // If the normalized number has exactly the expected local digit count,
+    // prepend the default country code to handle local numbers
+    if (normalized.length === localDigits) {
+      return [`${defaultCountryCode}${normalized}`];
     }
 
-    return [...new Set(candidates)];
+    // Otherwise, return the normalized number as-is (already properly formatted with country code)
+    return [normalized];
   }
 
   private shouldRetryLegacyLocalPhone(phone: string, errors: string[]) {
