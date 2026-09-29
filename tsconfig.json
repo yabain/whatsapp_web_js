@@ -13,5 +13,6 @@
     "incremental": true,
     "skipLibCheck": true,
     "strict": false
-  }
+  },
+  "exclude": ["node_modules", "dist", "**/*.spec.ts", "jest.config.ts", ".eslintrc.js"]
 }

@@ -1,10 +1,10 @@
 import { Module } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { PasswordAuthGuard } from './auth/password-auth.guard';
-import { WhatsappModule } from './whatsapp/whatsapp.module';
+import { CommonModule } from './common/common.module';
 
 @Module({
-  imports: [WhatsappModule],
+  imports: [CommonModule],
   providers: [
     {
       provide: APP_GUARD,

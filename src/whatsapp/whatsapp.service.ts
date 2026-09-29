@@ -1,15 +1,27 @@
-import { BadRequestException, Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { existsSync, mkdirSync, rmSync } from 'fs';
 import { isAbsolute, join } from 'path';
 import * as QRCode from 'qrcode';
 import { Client, LocalAuth, MessageMedia } from 'whatsapp-web.js';
+import {
+  WhatsAppException,
+  WhatsAppNotReadyException,
+  WhatsAppDisconnectedException,
+  WhatsAppAuthFailureException,
+  WhatsAppSendFailedException,
+  InvalidPhoneNumberException,
+} from './exceptions/whatsapp.exceptions';
+import { MetricsService } from '../common/metrics/metrics.service';
+import { JsonLogger } from '../common/logger/json-logger';
 
 type WhatsappConnectionStatus = 'initializing' | 'qr' | 'authenticated' | 'ready' | 'disconnected' | 'failed';
 
 @Injectable()
 export class WhatsappService implements OnModuleInit, OnModuleDestroy {
-  private readonly logger = new Logger(WhatsappService.name);
+  private readonly logger = new JsonLogger(WhatsappService.name);
   private client: Client | null = null;
+
+  constructor(private readonly metricsService: MetricsService) {}
   private status: WhatsappConnectionStatus = 'disconnected';
   private qrCode: string | null = null;
   private qrCodeDataUrl: string | null = null;
@@ -17,6 +29,9 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   private lastError: string | null = null;
   private initializing = false;
   private readyWatchdog: NodeJS.Timeout | null = null;
+  private readonly maxRetries = 3;
+  private readonly baseDelayMs = 1000; // 1 second base delay
+  private readonly maxDelayMs = 8000; // 8 seconds max delay
 
   async onModuleInit() {
     if (process.env.WHATSAPP_AUTO_INIT === 'false') return;
@@ -60,7 +75,8 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       try {
         rmSync(authPath, { recursive: true, force: true });
       } catch (error: any) {
-        this.status = 'failed';
+this.metricsService.incrementCounter('connection_init_failures_total');
+      this.status = 'failed';
         this.lastError = `Unable to reset WhatsApp session at ${authPath}: ${error?.message || error}`;
         this.logger.warn(this.lastError);
         return this.getStatus();
@@ -77,22 +93,23 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   }
 
   async sendText(phone: string, message: string) {
-    if (!this.client || this.status !== 'ready') {
-      throw new BadRequestException(`WhatsApp is not ready (current status: ${this.status})`);
-    }
-
+    await this.ensureReady();
     const candidates = this.buildPhoneCandidates(phone);
     const errors: string[] = [];
 
+    // Try each candidate with retry
     for (const candidate of candidates) {
       try {
-        const result = await this.sendToCandidate(candidate, message);
+        const result = await this.sendWithRetry(() => this.sendToCandidate(candidate, message));
+        this.metricsService.incrementCounter('messages_sent_total');
         return { sent: true, to: result.chatId, attemptedNumbers: candidates };
       } catch (error: any) {
+        this.metricsService.incrementCounter('messages_failed_total');
         errors.push(`${candidate}: ${error?.message || error}`);
       }
     }
 
+    // Try legacy local phone fallback if applicable
     if (this.shouldRetryLegacyLocalPhone(phone, errors)) {
       const retryCandidates = this.buildLegacyLocalPhoneCandidates(phone).filter((candidate) => !candidates.includes(candidate));
       if (retryCandidates.length) {
@@ -102,7 +119,9 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
         } else {
           for (const candidate of retryCandidates) {
             try {
-              const result = await this.sendToCandidate(candidate, message);
+              const result = await this.sendWithRetry(() => this.sendToCandidate(candidate, message));
+              this.metricsService.incrementCounter('messages_sent_total');
+              this.metricsService.incrementCounter('legacy_retry_success_total');
               return {
                 sent: true,
                 to: result.chatId,
@@ -116,7 +135,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    throw new BadRequestException(`Unable to send WhatsApp message. Attempts: ${errors.join(' | ')}`);
+    throw new WhatsAppSendFailedException(this.maxRetries, errors);
   }
 
   async sendMedia(
@@ -124,34 +143,100 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     message: string,
     media: { data: string; mimetype: string; filename?: string },
   ) {
-    if (!this.client || this.status !== 'ready') {
-      throw new BadRequestException(`WhatsApp is not ready (current status: ${this.status})`);
-    }
-
+    await this.ensureReady();
     const candidates = this.buildPhoneCandidates(phone);
     const errors: string[] = [];
+
     for (const candidate of candidates) {
       try {
-        const result = await this.sendMediaToCandidate(candidate, message, media);
+        const result = await this.sendWithRetry(() => this.sendMediaToCandidate(candidate, message, media));
+        this.metricsService.incrementCounter('media_sent_total');
         return { sent: true, to: result.chatId, attemptedNumbers: candidates };
       } catch (error: any) {
+        this.metricsService.incrementCounter('media_failed_total');
         errors.push(`${candidate}: ${error?.message || error}`);
       }
     }
 
     if (this.shouldRetryLegacyLocalPhone(phone, errors)) {
       const retryCandidates = this.buildLegacyLocalPhoneCandidates(phone).filter((candidate) => !candidates.includes(candidate));
-      for (const candidate of retryCandidates) {
-        try {
-          const result = await this.sendMediaToCandidate(candidate, message, media);
-          return { sent: true, to: result.chatId, attemptedNumbers: [...candidates, ...retryCandidates] };
-        } catch (error: any) {
-          errors.push(`${candidate}: ${error?.message || error}`);
+      if (retryCandidates.length) {
+        await this.restartClient();
+        if (!this.client || this.status !== 'ready') {
+          errors.push(`legacy retry: WhatsApp is not ready after restart (current status: ${this.status})`);
+        } else {
+          for (const candidate of retryCandidates) {
+            try {
+              const result = await this.sendWithRetry(() => this.sendMediaToCandidate(candidate, message, media));
+              return { sent: true, to: result.chatId, attemptedNumbers: [...candidates, ...retryCandidates] };
+            } catch (error: any) {
+              errors.push(`${candidate}: ${error?.message || error}`);
+            }
+          }
         }
       }
     }
 
-    throw new BadRequestException(`Unable to send WhatsApp media. Attempts: ${errors.join(' | ')}`);
+    throw new WhatsAppSendFailedException(this.maxRetries, errors);
+  }
+
+  /**
+   * Retry with exponential backoff
+   * Attempts: 1 (immediate), 2 (+1s), 3 (+2s), 4 (+4s)
+   */
+  private async sendWithRetry<T>(
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    let lastError: Error | null = null;
+
+    for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
+      try {
+        return await operation();
+      } catch (error: any) {
+        lastError = error;
+        const isLastAttempt = attempt === this.maxRetries;
+
+        // Don't retry on certain permanent errors
+        if (error?.message?.includes('Invalid phone number') || error?.message?.includes('not found')) {
+          this.logger.warn(`Permanent error on attempt ${attempt}, not retrying: ${error?.message}`);
+          throw error;
+        }
+
+        if (!isLastAttempt) {
+          const delay = Math.min(this.baseDelayMs * Math.pow(2, attempt - 1), this.maxDelayMs);
+          this.logger.warn(`Attempt ${attempt} failed, retrying in ${delay}ms: ${error?.message}`);
+          await this.sleep(delay);
+        } else {
+          this.logger.error(`All ${this.maxRetries} attempts failed: ${error?.message}`);
+        }
+      }
+    }
+
+    throw lastError;
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Ensures WhatsApp is ready before sending, with reconnection logic
+   */
+  private async ensureReady(): Promise<void> {
+    // If client exists but is not ready, try to restart
+    if (this.client && this.status !== 'ready') {
+      this.logger.warn(`WhatsApp not ready (status: ${this.status}), attempting reconnection...`);
+      await this.restartClient();
+    }
+
+    // If no client, initialize
+    if (!this.client) {
+      await this.initialize();
+    }
+
+    if (!this.client || this.status !== 'ready') {
+      throw new WhatsAppNotReadyException(this.status);
+    }
   }
 
   private async initialize() {
@@ -161,6 +246,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     this.lastError = null;
 
     try {
+      this.metricsService.incrementCounter('connection_init_attempts_total');
       const authPath = this.getAuthDataPath();
       mkdirSync(authPath, { recursive: true });
 
@@ -185,10 +271,11 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
 
       this.registerEvents(this.client);
       await this.client.initialize();
+      this.logger.log('WhatsApp client initialized successfully');
     } catch (error: any) {
       this.status = 'failed';
       this.lastError = error?.message || String(error);
-      this.logger.warn(`Unable to initialize WhatsApp client: ${this.lastError}`);
+      this.logger.error(`Unable to initialize WhatsApp client: ${this.lastError}`);
       if (this.client) {
         try { await this.client.destroy(); } catch { /* ignore */ }
       }
@@ -219,6 +306,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       this.qrCode = null;
       this.qrCodeDataUrl = null;
       this.connectedNumber = this.client?.info?.wid?.user || null;
+      this.metricsService.incrementCounter('connection_ready_total');
       this.logger.log(`WhatsApp ready${this.connectedNumber ? ` as ${this.connectedNumber}` : ''}`);
       this.patchLidFunctions();
     });
@@ -231,6 +319,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       this.qrCode = null;
       this.qrCodeDataUrl = null;
       this.client = null;
+      this.metricsService.incrementCounter('connection_disconnected_total');
       this.logger.warn(`WhatsApp disconnected: ${reason}`);
     });
 
@@ -238,7 +327,15 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
       this.clearReadyWatchdog();
       this.status = 'failed';
       this.lastError = message || 'Authentication failed';
-      this.logger.warn(`WhatsApp authentication failed: ${this.lastError}`);
+      this.logger.error(`WhatsApp authentication failed: ${this.lastError}`);
+    });
+
+    client.on('change_state', (state) => {
+      this.logger.debug(`WhatsApp state changed: ${state}`);
+    });
+
+    client.on('change_battery', (batteryInfo) => {
+      this.logger.debug(`WhatsApp battery changed: ${batteryInfo.battery}%`);
     });
   }
 
@@ -247,6 +344,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     if (!this.client) return;
     try {
       await this.client.destroy();
+      this.logger.log('WhatsApp client destroyed successfully');
     } catch (error: any) {
       this.logger.warn(`Unable to destroy WhatsApp client: ${error?.message || error}`);
     } finally {
@@ -272,10 +370,19 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     this.readyWatchdog = null;
   }
 
+  /**
+   * Restart the client with improved error handling
+   */
   private async restartClient() {
+    this.logger.warn('Restarting WhatsApp client...');
     await this.destroyClient();
     this.status = 'disconnected';
     await this.initialize();
+
+    // Use a string comparison since TypeScript can't track async status changes
+    if (`${this.status}` !== 'ready') {
+      this.logger.warn(`WhatsApp client restart attempted, current status: ${this.status}`);
+    }
   }
 
   private async patchLidFunctions() {
@@ -303,7 +410,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async sendToCandidate(candidate: string, message: string) {
-    if (!this.client) throw new BadRequestException('WhatsApp client is not initialized');
+    if (!this.client) throw new WhatsAppNotReadyException('client-not-initialized');
     const numberId = await this.client.getNumberId(candidate).catch(() => null);
     const userPart = numberId?.user || candidate;
     const chatId = `${userPart}@c.us`;
@@ -316,7 +423,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     message: string,
     media: { data: string; mimetype: string; filename?: string },
   ) {
-    if (!this.client) throw new BadRequestException('WhatsApp client is not initialized');
+    if (!this.client) throw new WhatsAppNotReadyException('client-not-initialized');
     const numberId = await this.client.getNumberId(candidate).catch(() => null);
     const userPart = numberId?.user || candidate;
     const chatId = `${userPart}@c.us`;
@@ -339,7 +446,13 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
 
     // Normalize: remove +, spaces, dashes, parentheses, etc.
     const normalized = String(phone || '').replace(/[+\s\-\(\)]/g, '');
-    if (!normalized) throw new BadRequestException('Phone number is required');
+    if (!normalized) throw new InvalidPhoneNumberException(phone);
+
+    // Must be at least 6 digits
+    if (normalized.length < 6) throw new InvalidPhoneNumberException(phone);
+
+    // Must contain only digits
+    if (!/^\d+$/.test(normalized)) throw new InvalidPhoneNumberException(phone);
 
     // If the normalized number has exactly the expected local digit count,
     // prepend the default country code to handle local numbers
@@ -351,7 +464,7 @@ export class WhatsappService implements OnModuleInit, OnModuleDestroy {
     return [normalized];
   }
 
-  private shouldRetryLegacyLocalPhone(phone: string, errors: string[]) {
+  private shouldRetryLegacyLocalPhone(phone: string, errors: string[]): boolean {
     const digits = String(phone || '').replace(/\D/g, '');
     if (!digits.startsWith('6') || digits.length !== 9) return false;
     return errors.some((error) => /detached frame|no lid for user|getchat/i.test(error));
